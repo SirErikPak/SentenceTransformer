@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sentiment Analyzer</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
+        .result-box { transition: all 0.5s ease-in-out; }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8 flex items-start justify-center">
+
+    <div class="w-full max-w-2xl bg-white p-6 sm:p-8 rounded-xl shadow-2xl border border-gray-100">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4 text-center">AI Sentiment Analyzer</h1>
+        <p class="text-gray-500 mb-6 text-center">Enter a block of text to classify its sentiment as **Positive**, **Negative**, or **Neutral**.</p>
+
+        <!-- Input Area -->
+        <textarea id="textInput"
+                  rows="8"
+                  placeholder="Paste your text here (e.g., product review, news snippet, or social media post)..."
+                  class="w-full p-4 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-gray-700 resize-none mb-6 shadow-inner"></textarea>
+
+        <!-- Action Button -->
+        <button id="analyzeButton"
+                onclick="analyzeSentiment()"
+                class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center">
+            <span id="buttonText">Analyze Sentiment</span>
+            <svg id="spinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+        </button>
+
+        <!-- Result Display -->
+        <div id="resultContainer" class="mt-8 result-box opacity-0 max-h-0 overflow-hidden">
+            <div id="resultBox" class="p-6 rounded-lg shadow-inner flex items-center justify-center">
+                <p class="text-lg font-bold" id="sentimentOutput"></p>
+            </div>
+        </div>
+
+        <!-- System Status -->
+        <div id="statusMessage" class="mt-4 text-sm text-center text-gray-400">
+            System Ready.
+        </div>
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables for Firebase access
+        window.app = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false;
+
+        const initializeFirebase = async () => {
+            try {
+                // Ensure global variables are available
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase configuration is missing.");
+                    return;
+                }
+
+                // 1. Initialize Firebase
+                window.app = initializeApp(firebaseConfig);
+                window.db = getFirestore(window.app);
+                window.auth = getAuth(window.app);
+                setLogLevel('Debug');
+
+                // 2. Authenticate
+                const authToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (authToken) {
+                    await signInWithCustomToken(window.auth, authToken);
+                } else {
+                    await signInAnonymously(window.auth);
+                }
+
+                window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
+                window.isAuthReady = true;
+                document.getElementById('statusMessage').textContent = 'Authentication Successful. Ready to Analyze.';
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                document.getElementById('statusMessage').textContent = 'Initialization Failed. Check console.';
+            }
+        };
+
+        window.onload = initializeFirebase;
+    </script>
+
+    <script>
+        const API_MODEL = "gemini-2.5-flash-preview-09-2025";
+        const apiKey = ""; // API key will be provided by the runtime environment
+
+        // Utility function for exponential backoff
+        async function fetchWithBackoff(url, options, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        // Throw error if response status is not 2xx
+                        const errorBody = await response.json().catch(() => ({}));
+                        throw new Error(`API Error: ${response.status} - ${errorBody.error?.message || response.statusText}`);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i === maxRetries - 1) {
+                        console.error(`Fetch failed after ${maxRetries} attempts.`, error);
+                        throw error;
+                    }
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    // console.warn(`Retrying in ${delay.toFixed(0)}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        function setUIState(isLoading) {
+            const button = document.getElementById('analyzeButton');
+            const spinner = document.getElementById('spinner');
+            const buttonText = document.getElementById('buttonText');
+            const input = document.getElementById('textInput');
+
+            button.disabled = isLoading;
+            input.disabled = isLoading;
+            spinner.classList.toggle('hidden', !isLoading);
+            buttonText.textContent = isLoading ? 'Analyzing...' : 'Analyze Sentiment';
+            document.getElementById('statusMessage').textContent = isLoading ? 'Sending request to AI model...' : 'Ready to Analyze.';
+
+            // Reset result display on new analysis start
+            const resultContainer = document.getElementById('resultContainer');
+            if (isLoading) {
+                resultContainer.classList.add('opacity-0', 'max-h-0');
+            }
+        }
+
+        function displayResult(sentiment) {
+            const resultContainer = document.getElementById('resultContainer');
+            const resultBox = document.getElementById('resultBox');
+            const sentimentOutput = document.getElementById('sentimentOutput');
+
+            sentimentOutput.textContent = sentiment.toUpperCase();
+
+            // Apply styling based on sentiment
+            let bgColor = '';
+            let textColor = 'text-white';
+            let icon = '';
+
+            switch (sentiment.toLowerCase()) {
+                case 'positive':
+                    bgColor = 'bg-green-500';
+                    icon = '🎉 POSITIVE';
+                    break;
+                case 'negative':
+                    bgColor = 'bg-red-500';
+                    icon = '😞 NEGATIVE';
+                    break;
+                case 'neutral':
+                    bgColor = 'bg-yellow-500';
+                    icon = '😐 NEUTRAL';
+                    break;
+                default:
+                    bgColor = 'bg-gray-500';
+                    textColor = 'text-gray-800';
+                    icon = '❓ UNKNOWN';
+            }
+
+            resultBox.className = `p-6 rounded-lg shadow-lg flex items-center justify-center ${bgColor}`;
+            sentimentOutput.className = `${textColor} text-xl sm:text-2xl font-extrabold tracking-wider`;
+            sentimentOutput.textContent = icon;
+
+            // Show the container
+            resultContainer.classList.remove('opacity-0', 'max-h-0');
+            resultContainer.classList.add('opacity-100', 'max-h-96');
+        }
+
+        async function analyzeSentiment() {
+            if (!window.isAuthReady) {
+                document.getElementById('statusMessage').textContent = 'Error: System not authenticated. Please wait for initialization.';
+                return;
+            }
+
+            const text = document.getElementById('textInput').value.trim();
+            if (!text) {
+                document.getElementById('statusMessage').textContent = 'Please enter some text to analyze.';
+                return;
+            }
+
+            setUIState(true);
+
+            try {
+                const systemPrompt = "You are a specialized sentiment analysis model. Your task is to analyze the provided text and classify its overall sentiment into exactly one of three categories: 'positive', 'negative', or 'neutral'. You must output the result strictly in the requested JSON format.";
+
+                const payload = {
+                    contents: [{ parts: [{ text: text }] }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                "sentiment": {
+                                    "type": "STRING",
+                                    "enum": ["positive", "negative", "neutral"],
+                                    "description": "The classified sentiment of the text."
+                                }
+                            },
+                            propertyOrdering: ["sentiment"]
+                        }
+                    }
+                };
+
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${apiKey}`;
+
+                const response = await fetchWithBackoff(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                
+                const candidate = result.candidates?.[0];
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    const jsonString = candidate.content.parts[0].text;
+                    const parsedJson = JSON.parse(jsonString);
+                    const sentiment = parsedJson.sentiment;
+
+                    if (sentiment) {
+                        displayResult(sentiment);
+                        document.getElementById('statusMessage').textContent = `Analysis Complete. Sentiment: ${sentiment.toUpperCase()}`;
+                    } else {
+                        throw new Error("API response did not contain the expected 'sentiment' field.");
+                    }
+                } else {
+                    throw new Error("API response structure was invalid or empty.");
+                }
+
+            } catch (error) {
+                console.error("Sentiment Analysis Failed:", error);
+                document.getElementById('statusMessage').textContent = `Analysis Failed. Error: ${error.message}`;
+                // Hide result box on error
+                document.getElementById('resultContainer').classList.remove('opacity-100', 'max-h-96');
+                document.getElementById('resultContainer').classList.add('opacity-0', 'max-h-0');
+
+            } finally {
+                setUIState(false);
+            }
+        }
+    </script>
+</body>
+</html>
