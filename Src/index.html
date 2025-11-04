@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sentiment Analyzer</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Use Inter font -->
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+    </style>
+</head>
+<body class="p-4 sm:p-8 flex justify-center items-start min-h-screen">
+
+    <div id="app" class="w-full max-w-4xl bg-white rounded-xl p-6 sm:p-10 card-shadow mt-10">
+        <h1 class="text-3xl font-extrabold text-gray-800 mb-2">
+            AI Sentiment Analyzer
+        </h1>
+        <p class="text-gray-500 mb-6 border-b pb-4">
+            Powered by the Gemini API. Paste text below and click "Analyze" to determine its overall sentiment (positive, neutral, or negative) and get an explanation.
+        </p>
+
+        <!-- Input Section -->
+        <div class="mb-6">
+            <label for="text-input" class="block text-sm font-medium text-gray-700 mb-2">
+                Text to Analyze
+            </label>
+            <textarea id="text-input" rows="6" placeholder="Enter text here (e.g., I love this product, the quality is outstanding and the delivery was fast)."
+                class="w-full p-4 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 ease-in-out resize-y"></textarea>
+        </div>
+
+        <div class="flex flex-col sm:flex-row justify-between items-center mb-6 space-y-4 sm:space-y-0 sm:space-x-4">
+            <button id="analyze-button"
+                class="w-full sm:w-auto px-6 py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
+                disabled>
+                Analyze Sentiment
+            </button>
+            <button id="save-button"
+                class="w-full sm:w-auto px-6 py-3 bg-green-500 text-white font-semibold rounded-xl hover:bg-green-600 transition duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50"
+                disabled>
+                Save Analysis
+            </button>
+        </div>
+        
+        <!-- Loading and Status Area -->
+        <div id="status-message" class="mt-4 p-3 rounded-lg text-sm hidden" role="alert"></div>
+
+        <!-- Output Section -->
+        <div id="results-card" class="mt-8 p-6 bg-gray-50 border border-gray-200 rounded-xl hidden">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Analysis Results</h2>
+            <div id="sentiment-output" class="mb-4">
+                <p class="font-semibold text-lg text-gray-700 mb-1">Sentiment: <span id="sentiment-label" class="font-extrabold text-xl text-indigo-600">...</span></p>
+            </div>
+            <div id="explanation-output" class="text-gray-600 whitespace-pre-wrap">
+                <p class="font-semibold text-gray-700 mb-2">Explanation:</p>
+                <div id="explanation-text"></div>
+            </div>
+        </div>
+
+        <!-- History Section -->
+        <div class="mt-10 pt-6 border-t border-gray-200">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Analysis History</h2>
+            <div id="history-list" class="space-y-4">
+                <p id="loading-history" class="text-gray-500">Loading history...</p>
+                <!-- History items will be inserted here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK Imports (required for database and auth) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, orderBy, deleteDoc, getDocs, setDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables
+        let app;
+        let db;
+        let auth;
+        let userId;
+
+        // Configuration and API Key for Gemini
+        const GEMINI_API_MODEL = "gemini-2.5-flash-preview-09-2025";
+        const API_KEY = ""; // Managed by the Canvas environment
+
+        // Global status elements
+        const textInput = document.getElementById('text-input');
+        const analyzeButton = document.getElementById('analyze-button');
+        const saveButton = document.getElementById('save-button');
+        const statusMessage = document.getElementById('status-message');
+        const resultsCard = document.getElementById('results-card');
+        const sentimentLabel = document.getElementById('sentiment-label');
+        const explanationText = document.getElementById('explanation-text');
+        const historyList = document.getElementById('history-list');
+        const loadingHistory = document.getElementById('loading-history');
+        
+        // --- Utility Functions ---
+
+        /**
+         * Simple Base64 decoding (for ArrayBuffer conversion used in pcmToWav if needed).
+         */
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        };
+
+        /**
+         * Displays a temporary status message to the user.
+         * @param {string} message - The message to display.
+         * @param {string} type - 'success', 'error', or 'info'.
+         */
+        const showStatus = (message, type) => {
+            statusMessage.textContent = message;
+            statusMessage.className = 'mt-4 p-3 rounded-lg text-sm'; // Reset classes
+            statusMessage.classList.remove('hidden');
+
+            switch (type) {
+                case 'success':
+                    statusMessage.classList.add('bg-green-100', 'text-green-800');
+                    break;
+                case 'error':
+                    statusMessage.classList.add('bg-red-100', 'text-red-800');
+                    break;
+                case 'info':
+                default:
+                    statusMessage.classList.add('bg-blue-100', 'text-blue-800');
+                    break;
+            }
+            // Hide after 5 seconds
+            setTimeout(() => {
+                statusMessage.classList.add('hidden');
+            }, 5000);
+        };
+
+        /**
+         * Handles the API call to Gemini for content generation.
+         * @param {string} systemPrompt - Instructions for the model's behavior.
+         * @param {string} userQuery - The user's input for the analysis.
+         * @returns {Promise<{text: string, sources: Array<{uri: string, title: string}>}>}
+         */
+        const generateContentWithRetry = async (systemPrompt, userQuery) => {
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_API_MODEL}:generateContent?key=${API_KEY}`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                // Use search grounding to base the analysis on up-to-date web context if needed, 
+                // though for pure sentiment analysis it might be optional.
+                tools: [{ "google_search": {} }], 
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+                config: {
+                    temperature: 0.1, // Keep analysis grounded and low-creativity
+                }
+            };
+
+            const maxRetries = 3;
+            let lastError = null;
+
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                if (attempt > 0) {
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        const errorBody = await response.json();
+                        throw new Error(`API call failed with status ${response.status}: ${errorBody.error?.message || 'Unknown error'}`);
+                    }
+
+                    const result = await response.json();
+                    const candidate = result.candidates?.[0];
+
+                    if (candidate && candidate.content?.parts?.[0]?.text) {
+                        const text = candidate.content.parts[0].text;
+                        
+                        let sources = [];
+                        const groundingMetadata = candidate.groundingMetadata;
+                        if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                            sources = groundingMetadata.groundingAttributions
+                                .map(attribution => ({
+                                    uri: attribution.web?.uri,
+                                    title: attribution.web?.title,
+                                }))
+                                .filter(source => source.uri && source.title);
+                        }
+
+                        return { text, sources };
+
+                    } else {
+                        throw new Error("Received an empty or malformed response from the Gemini API.");
+                    }
+                } catch (error) {
+                    lastError = error;
+                    console.error(`Attempt ${attempt + 1} failed:`, error);
+                    if (attempt === maxRetries) {
+                        throw new Error(`Failed to generate content after ${maxRetries} retries. Last error: ${lastError.message}`);
+                    }
+                }
+            }
+        };
+
+        // --- Authentication and Initialization ---
+
+        /**
+         * Initializes Firebase and authenticates the user.
+         */
+        const initializeFirebase = async () => {
+            try {
+                // Ensure global variables are defined in the Canvas environment
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                // 1. Initialize App and Services
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('error'); // Set level to reduce noisy logs, 'Debug' for full debugging
+
+                // 2. Handle Authentication
+                // Use the custom token if provided, otherwise sign in anonymously
+                await new Promise((resolve) => {
+                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            console.log("Firebase Auth Ready. User ID:", userId);
+                            // Enable buttons now that auth is confirmed
+                            analyzeButton.disabled = false;
+                            saveButton.disabled = false;
+                            
+                            // 3. Start listening to history ONLY after auth is ready
+                            setupHistoryListener();
+                            unsubscribe(); // Stop listening once we have the initial user
+                            resolve();
+                        } else {
+                            // Only attempt sign-in if no user is present
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken).catch(e => {
+                                    console.error("Custom token sign-in failed:", e);
+                                    signInAnonymously(auth); // Fallback to anonymous
+                                });
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                            // The onAuthStateChanged listener will catch the result of sign-in
+                        }
+                    });
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                showStatus("Error: Failed to initialize application services. Check console for details.", 'error');
+            }
+        };
+
+        // --- Core Logic ---
+
+        /**
+         * Main function to analyze the user's text.
+         */
+        const analyzeSentiment = async () => {
+            const text = textInput.value.trim();
+            if (!text) {
+                showStatus("Please enter some text to analyze.", 'info');
+                return;
+            }
+
+            // Reset UI for new analysis
+            resultsCard.classList.add('hidden');
+            sentimentLabel.textContent = 'Analyzing...';
+            explanationText.innerHTML = '';
+            analyzeButton.disabled = true;
+            saveButton.disabled = true;
+            showStatus("Requesting analysis from AI...", 'info');
+
+            const systemPrompt = `You are a world-class sentiment analysis engine. Analyze the following text and provide a concise, two-part response formatted exactly as follows:
+            SENTIMENT: [Positive|Neutral|Negative]
+            EXPLANATION: [A brief, two-to-three sentence explanation of why you assigned that sentiment, referencing specific words or phrases in the text.]`;
+            const userQuery = `Analyze the sentiment of the following text:\n\n---\n\n"${text}"`;
+
+            try {
+                const { text: rawResponse } = await generateContentWithRetry(systemPrompt, userQuery);
+
+                const lines = rawResponse.split('\n');
+                let sentiment = 'N/A';
+                let explanation = '';
+
+                // Parse the structured response
+                lines.forEach(line => {
+                    if (line.startsWith('SENTIMENT:')) {
+                        sentiment = line.replace('SENTIMENT:', '').trim();
+                    } else if (line.startsWith('EXPLANATION:')) {
+                        explanation = line.replace('EXPLANATION:', '').trim();
+                    }
+                });
+
+                // Update UI with results
+                sentimentLabel.textContent = sentiment;
+                explanationText.textContent = explanation;
+                resultsCard.classList.remove('hidden');
+
+                // Apply color based on sentiment
+                let sentimentColor = 'text-gray-600';
+                if (sentiment.toUpperCase().includes('POSITIVE')) {
+                    sentimentColor = 'text-green-600';
+                } else if (sentiment.toUpperCase().includes('NEGATIVE')) {
+                    sentimentColor = 'text-red-600';
+                } else if (sentiment.toUpperCase().includes('NEUTRAL')) {
+                    sentimentColor = 'text-yellow-600';
+                }
+                sentimentLabel.className = `font-extrabold text-xl ${sentimentColor}`;
+
+                showStatus("Analysis complete!", 'success');
+                saveButton.disabled = false; // Enable save button after successful analysis
+
+            } catch (error) {
+                console.error("Sentiment analysis failed:", error);
+                showStatus(`Analysis failed: ${error.message}`, 'error');
+                sentimentLabel.textContent = 'Error';
+                explanationText.textContent = 'Could not process the request.';
+                resultsCard.classList.remove('hidden');
+            } finally {
+                analyzeButton.disabled = false;
+            }
+        };
+
+        /**
+         * Saves the current analysis result to Firestore.
+         */
+        const saveAnalysis = async () => {
+            const text = textInput.value.trim();
+            const sentiment = sentimentLabel.textContent;
+            const explanation = explanationText.textContent;
+
+            if (!userId) {
+                showStatus("Authentication pending. Please wait.", 'error');
+                return;
+            }
+            if (sentiment === 'Analyzing...' || sentiment === 'Error' || !text) {
+                showStatus("Please complete a successful analysis before saving.", 'info');
+                return;
+            }
+
+            saveButton.disabled = true;
+
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                // Path for private user data: /artifacts/{appId}/users/{userId}/analysis_history
+                const historyCollectionRef = collection(db, 'artifacts', appId, 'users', userId, 'analysis_history');
+
+                await addDoc(historyCollectionRef, {
+                    timestamp: serverTimestamp(),
+                    text: text,
+                    sentiment: sentiment,
+                    explanation: explanation,
+                });
+                showStatus("Analysis saved successfully to history!", 'success');
+                textInput.value = ''; // Clear input after saving
+
+            } catch (error) {
+                console.error("Error saving analysis:", error);
+                showStatus("Error: Could not save analysis to history.", 'error');
+            } finally {
+                saveButton.disabled = false;
+            }
+        };
+
+        /**
+         * Deletes an analysis record from Firestore.
+         * @param {string} docId - The Firestore document ID.
+         */
+        const deleteAnalysis = async (docId) => {
+            if (!userId) return;
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const docRef = doc(db, 'artifacts', appId, 'users', userId, 'analysis_history', docId);
+                
+                // Show a temporary message while deleting
+                const itemToRemove = document.getElementById(`history-item-${docId}`);
+                if (itemToRemove) {
+                    itemToRemove.classList.add('opacity-50', 'line-through');
+                }
+
+                await deleteDoc(docRef);
+                // onSnapshot will handle the UI update, no need to manually remove
+
+            } catch (error) {
+                console.error("Error deleting document:", error);
+                showStatus("Error: Could not delete analysis from history.", 'error');
+            }
+        };
+
+        /**
+         * Sets up the real-time listener for the user's analysis history.
+         */
+        const setupHistoryListener = () => {
+            if (!userId) {
+                // This shouldn't happen if called from onAuthStateChanged callback, but is a safeguard.
+                console.error("Cannot set up history listener: User ID is missing.");
+                loadingHistory.textContent = "Error loading history: Authentication required.";
+                return;
+            }
+
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const historyCollectionRef = collection(db, 'artifacts', appId, 'users', userId, 'analysis_history');
+            
+            // Note: orderBy is commented out because it requires complex indexing in Firestore, 
+            // which can cause runtime errors in development environments. Sorting is done client-side.
+            // const q = query(historyCollectionRef, orderBy('timestamp', 'desc'));
+            const q = query(historyCollectionRef); 
+
+            onSnapshot(q, (snapshot) => {
+                const analyses = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    analyses.push({ 
+                        id: doc.id, 
+                        ...data,
+                        // Ensure timestamp is a Date object for client-side sorting
+                        timestamp: data.timestamp ? data.timestamp.toDate() : new Date(0) 
+                    });
+                });
+
+                // Client-side sorting by timestamp (newest first)
+                analyses.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+                renderHistory(analyses);
+            }, (error) => {
+                console.error("Error listening to history:", error);
+                loadingHistory.textContent = "Error fetching history. Check console for details.";
+            });
+        };
+
+        /**
+         * Renders the analysis history list.
+         * @param {Array<Object>} analyses - Array of analysis documents.
+         */
+        const renderHistory = (analyses) => {
+            historyList.innerHTML = ''; // Clear current list
+
+            if (analyses.length === 0) {
+                historyList.innerHTML = '<p class="text-gray-500">No saved analyses yet.</p>';
+                return;
+            }
+
+            analyses.forEach(analysis => {
+                let sentimentClass = 'bg-gray-200 text-gray-800';
+                if (analysis.sentiment.toUpperCase().includes('POSITIVE')) {
+                    sentimentClass = 'bg-green-100 text-green-700';
+                } else if (analysis.sentiment.toUpperCase().includes('NEGATIVE')) {
+                    sentimentClass = 'bg-red-100 text-red-700';
+                } else if (analysis.sentiment.toUpperCase().includes('NEUTRAL')) {
+                    sentimentClass = 'bg-yellow-100 text-yellow-700';
+                }
+
+                const dateString = analysis.timestamp.toLocaleString();
+                
+                const item = document.createElement('div');
+                item.id = `history-item-${analysis.id}`;
+                item.className = 'flex flex-col sm:flex-row p-4 border border-gray-200 rounded-lg hover:bg-gray-50 transition duration-150 ease-in-out';
+                item.innerHTML = `
+                    <div class="flex-grow">
+                        <span class="text-xs font-medium ${sentimentClass} px-2.5 py-0.5 rounded-full inline-block mb-1">
+                            ${analysis.sentiment}
+                        </span>
+                        <p class="text-gray-900 font-medium mb-1 line-clamp-2">${analysis.text}</p>
+                        <p class="text-sm text-gray-600 mb-2">Explanation: ${analysis.explanation}</p>
+                        <p class="text-xs text-gray-400">${dateString}</p>
+                    </div>
+                    <div class="flex-shrink-0 mt-3 sm:mt-0 sm:ml-4 flex justify-end items-start">
+                        <button class="text-red-500 hover:text-red-700 transition duration-150 ease-in-out p-1 rounded-full bg-red-50 hover:bg-red-100 delete-btn" 
+                                data-id="${analysis.id}" title="Delete Analysis">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 pointer-events-none" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
+                `;
+                historyList.appendChild(item);
+            });
+
+            // Re-attach listeners for delete buttons
+            historyList.querySelectorAll('.delete-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const docId = e.currentTarget.getAttribute('data-id');
+                    if (docId) {
+                        deleteAnalysis(docId);
+                    }
+                });
+            });
+        };
+
+        // --- Event Listeners and Initialization ---
+        
+        // This is where we call the Firebase setup and begin the application flow.
+        window.onload = function() {
+            analyzeButton.addEventListener('click', analyzeSentiment);
+            saveButton.addEventListener('click', saveAnalysis);
+
+            // Immediately disable buttons until authentication is successful
+            analyzeButton.disabled = true;
+            saveButton.disabled = true;
+            loadingHistory.textContent = "Authenticating system...";
+            
+            // Start the initialization process
+            initializeFirebase(); 
+        };
+
+    </script>
+</body>
+</html>
